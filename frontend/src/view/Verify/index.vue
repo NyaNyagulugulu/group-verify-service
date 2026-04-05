@@ -74,6 +74,7 @@
     <div class="footer">
       <p class="footer-text">前端美化：<a href="https://github.com/FantasyNetworkCN" target="_blank">FantasyNetwork</a></p>
       <p class="footer-text">友联：<a href="https://music.cnmsb.xin/" target="_blank">Neko云音乐</a></p>
+      <p v-if="icpInfo" class="footer-text icp-text">{{ icpInfo }}</p>
     </div>
   </div>
 </template>
@@ -101,11 +102,49 @@ const captchaId = ref('');
 const expireMinutes = ref(null);
 const captchaReady = ref(false);
 const submitting = ref(false);
+const icpInfo = ref('');
 
 let captchaObj = null;
 
 const title = computed(() => (verified.value ? t('title_success') : t('title_default')));
 const expireTip = computed(() => (expireMinutes.value ? t('expire_tip', { minutes: expireMinutes.value }) : ''));
+
+async function getIcpInfo() {
+  try {
+    const hostname = window.location.hostname;
+    console.log('Current hostname:', hostname);
+    
+    // 尝试多个可能的路径
+    const paths = ['/icp.json', '/static/verify/icp.json', './icp.json'];
+    let icpData = null;
+    
+    for (const path of paths) {
+      try {
+        console.log('Trying path:', path);
+        const response = await fetch(path);
+        if (response.ok) {
+          icpData = await response.json();
+          console.log('Loaded ICP data:', icpData);
+          break;
+        }
+      } catch (e) {
+        console.log('Failed to load from path:', path, e);
+        continue;
+      }
+    }
+    
+    if (icpData && icpData[hostname]) {
+      icpInfo.value = icpData[hostname];
+      console.log('Found ICP info for', hostname, ':', icpInfo.value);
+    } else {
+      console.log('No ICP info found for hostname:', hostname);
+      icpInfo.value = '';
+    }
+  } catch (e) {
+    console.error('Failed to load ICP info:', e);
+    icpInfo.value = '';
+  }
+}
 
 function showExpired() {
   error.value = t('link_expired_or_missing');
@@ -272,6 +311,7 @@ async function refreshStatus() {
 
 onMounted(() => {
   ticket.value = parseTicketFromLocation();
+  getIcpInfo();
   if (!ticket.value) {
     loading.value = false;
     error.value = t('invalid_link');
@@ -480,18 +520,21 @@ onMounted(() => {
 }
 
 .error-icon {
-  width: 68px;
-  height: 68px;
-  margin: 0 auto 20px;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 24px;
   border-radius: 50%;
   background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
   border: 3px solid #ef4444;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 32px;
+  font-size: 34px;
   color: #ef4444;
-  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.15);
+  box-shadow: 
+    0 6px 20px rgba(239, 68, 68, 0.2),
+    inset 0 2px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -2px 4px rgba(239, 68, 68, 0.1);
   animation: errorShake 0.5s ease-in-out;
   position: relative;
 }
@@ -745,19 +788,19 @@ onMounted(() => {
 
 .steps-box {
   background: linear-gradient(135deg, #fdf4ff 0%, #fae8ff 50%, #f5d0fe 100%);
-  border-radius: 16px;
-  padding: 22px 28px;
+  border-radius: 18px;
+  padding: 24px 32px;
   margin-bottom: 24px;
   border: 2px solid #e9d5ff;
   color: #7c3aed;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.8;
   text-align: center;
   font-weight: 600;
   box-shadow: 
-    0 6px 20px rgba(192, 132, 252, 0.2),
+    0 8px 24px rgba(192, 132, 252, 0.25),
     inset 0 2px 0 rgba(255, 255, 255, 0.9),
-    inset 0 -2px 4px rgba(192, 132, 252, 0.05);
+    inset 0 -2px 6px rgba(192, 132, 252, 0.08);
   position: relative;
   overflow: hidden;
 }
@@ -768,7 +811,7 @@ onMounted(() => {
   top: 0;
   left: 0;
   right: 0;
-  height: 4px;
+  height: 5px;
   background: linear-gradient(90deg, #c084fc, #e879f9, #f472b6);
   background-size: 200% 100%;
   animation: gradientMove 3s linear infinite;
@@ -781,7 +824,7 @@ onMounted(() => {
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(circle, rgba(192, 132, 252, 0.1) 0%, transparent 60%);
+  background: radial-gradient(circle, rgba(192, 132, 252, 0.12) 0%, transparent 60%);
   animation: stepsPulse 5s ease-in-out infinite;
   pointer-events: none;
 }
@@ -798,16 +841,22 @@ onMounted(() => {
 }
 
 .captcha-container {
-  min-height: 220px;
+  min-height: 240px;
   margin-bottom: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%);
-  border-radius: 14px;
-  border: 2px dashed #e9d5ff;
+  border-radius: 16px;
+  border: 3px dashed #e9d5ff;
   position: relative;
   overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.captcha-container:hover {
+  border-color: #d8b4fe;
+  box-shadow: 0 0 20px rgba(192, 132, 252, 0.15);
 }
 
 .captcha-container::before {
@@ -817,9 +866,35 @@ onMounted(() => {
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(circle, rgba(192, 132, 252, 0.08) 0%, transparent 60%);
+  background: radial-gradient(circle, rgba(192, 132, 252, 0.1) 0%, transparent 60%);
   animation: captchaPulse 6s ease-in-out infinite;
   pointer-events: none;
+}
+
+.captcha-container::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(192, 132, 252, 0.1),
+    transparent
+  );
+  animation: captchaShine 3s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes captchaShine {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
 }
 
 @keyframes captchaPulse {
@@ -836,37 +911,38 @@ onMounted(() => {
 .button-group {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .btn {
   width: 100%;
-  padding: 16px 24px;
-  border-radius: 12px;
+  padding: 18px 28px;
+  border-radius: 14px;
   border: none;
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.3s ease;
   position: relative;
   overflow: hidden;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .btn:active {
-  transform: scale(0.98);
+  transform: scale(0.97);
 }
 
 .btn-primary {
   background: linear-gradient(135deg, #c084fc 0%, #e879f9 50%, #f472b6 100%);
-  background-size: 200% 200%;
   color: white;
   box-shadow: 
-    0 4px 12px rgba(192, 132, 252, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.3);
+    0 8px 24px rgba(192, 132, 252, 0.45),
+    inset 0 2px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.05);
+  border: 2px solid rgba(255, 255, 255, 0.3);
   position: relative;
   overflow: hidden;
-  animation: gradientMove 3s ease infinite;
 }
 
 .btn-primary::before {
@@ -883,39 +959,27 @@ onMounted(() => {
     transparent
   );
   transition: left 0.5s ease;
+  pointer-events: none;
 }
 
 .btn-primary:hover:not(:disabled)::before {
   left: 100%;
 }
 
-.btn-primary::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.2) 0%,
-    transparent 100%
-  );
-  pointer-events: none;
-}
-
 .btn-primary:hover:not(:disabled) {
-  transform: translateY(-2px);
+  transform: translateY(-3px);
   box-shadow: 
-    0 8px 24px rgba(192, 132, 252, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    0 12px 32px rgba(192, 132, 252, 0.55),
+    inset 0 2px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.05);
 }
 
 .btn-primary:active:not(:disabled) {
   transform: translateY(0px);
   box-shadow: 
-    0 2px 8px rgba(192, 132, 252, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    0 4px 16px rgba(192, 132, 252, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.05);
 }
 
 .btn-primary:disabled {
@@ -923,14 +987,16 @@ onMounted(() => {
   cursor: not-allowed;
   transform: none;
   box-shadow: none;
-  animation: none;
 }
 
 .btn-secondary {
   background: linear-gradient(135deg, #fdf4ff 0%, #fae8ff 100%);
   color: #7c3aed;
   border: 2px solid #e9d5ff;
-  box-shadow: 0 2px 8px rgba(192, 132, 252, 0.15);
+  box-shadow: 
+    0 4px 16px rgba(192, 132, 252, 0.2),
+    inset 0 2px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -2px 4px rgba(192, 132, 252, 0.05);
   position: relative;
   overflow: hidden;
 }
@@ -949,6 +1015,7 @@ onMounted(() => {
     transparent
   );
   transition: left 0.5s ease;
+  pointer-events: none;
 }
 
 .btn-secondary:hover:not(:disabled)::before {
@@ -957,14 +1024,21 @@ onMounted(() => {
 
 .btn-secondary:hover:not(:disabled) {
   background: linear-gradient(135deg, #fae8ff 0%, #f5d0fe 100%);
-  transform: translateY(-2px);
+  transform: translateY(-3px);
   border-color: #d8b4fe;
-  box-shadow: 0 4px 16px rgba(192, 132, 252, 0.3);
+  box-shadow: 
+    0 8px 24px rgba(192, 132, 252, 0.3),
+    inset 0 2px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -2px 4px rgba(192, 132, 252, 0.08);
 }
 
 .btn-secondary:active:not(:disabled) {
   transform: translateY(0px);
   background: linear-gradient(135deg, #f5d0fe 0%, #f0abfc 100%);
+  box-shadow: 
+    0 2px 12px rgba(192, 132, 252, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    inset 0 -2px 4px rgba(192, 132, 252, 0.05);
 }
 
 .btn-secondary:disabled {
@@ -1142,6 +1216,12 @@ onMounted(() => {
   margin-left: 8px;
   color: rgba(255, 255, 255, 0.6);
   animation: starPulse 2s ease-in-out infinite 1s;
+}
+
+.icp-text {
+  opacity: 0.8;
+  font-size: 12px;
+  letter-spacing: 0.3px;
 }
 
 @keyframes starPulse {
