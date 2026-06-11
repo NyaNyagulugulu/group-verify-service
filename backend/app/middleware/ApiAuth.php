@@ -1,84 +1,35 @@
 <?php
 namespace app\middleware;
 
+use app\traits\ApiKeyTrait;
 use think\facade\Db;
 
 class ApiAuth
 {
-    protected static ?string $cachedApiKeyRaw = null;
+    use ApiKeyTrait;
+
     protected static ?array $cachedApiKeyRows = null;
     protected static int $cachedApiKeyRowsAt = 0;
-    protected static bool $settingsReady = false;
-    protected static bool $apiKeysReady = false;
 
-    protected function ensureSettingsReady(): void
+    public static function clearCache(): void
     {
-        if (self::$settingsReady) {
-            return;
-        }
-        ensure_settings_table();
-        self::$settingsReady = true;
-    }
-
-    protected function ensureApiKeysReady(): void
-    {
-        if (self::$apiKeysReady) {
-            return;
-        }
-        ensure_api_keys_table();
-        self::$apiKeysReady = true;
-    }
-
-    protected function parseApiKeys(string $raw): array
-    {
-        $v = trim($raw);
-        if ($v === '') {
-            return [];
-        }
-
-        if (str_starts_with($v, '[') && str_ends_with($v, ']')) {
-            $decoded = json_decode($v, true);
-            if (is_array($decoded)) {
-                $keys = [];
-                foreach ($decoded as $it) {
-                    if (!is_string($it)) {
-                        continue;
-                    }
-                    $k = trim($it);
-                    if ($k === '') {
-                        continue;
-                    }
-                    $keys[$k] = true;
-                }
-                return array_keys($keys);
-            }
-        }
-
-        $parts = preg_split('/[,\s;，；]+/u', $v) ?: [];
-        $keys = [];
-        foreach ($parts as $p) {
-            $k = trim((string)$p);
-            if ($k === '') {
-                continue;
-            }
-            $keys[$k] = true;
-        }
-        return array_keys($keys);
+        self::$cachedApiKeyRows = null;
+        self::$cachedApiKeyRowsAt = 0;
     }
 
     protected function readApiKeyRowsFromTable(): array
     {
         $this->ensureApiKeysReady();
         try {
-            $rows = Db::name('api_keys')->field('id,value')->select()->toArray();
+            $rows = Db::name('api_keys')->field('id,hash')->select()->toArray();
             $items = [];
             foreach ($rows ?: [] as $r) {
                 $id = (int)($r['id'] ?? 0);
-                $v = trim((string)($r['value'] ?? ''));
-                if ($id <= 0 || $v === '') {
+                $h = trim((string)($r['hash'] ?? ''));
+                if ($id <= 0 || $h === '') {
                     continue;
                 }
-                $items[] = ['id' => $id, 'value' => $v];
+                $items[] = ['id' => $id, 'hash' => $h];
             }
             return $items;
         } catch (\Throwable $e) {
@@ -97,49 +48,12 @@ class ApiAuth
             }
             try {
                 Db::name('api_keys')->insert([
-                    'value' => $k,
+                    'hash' => hash('sha256', $k),
                     'created_at' => $ts,
                     'updated_at' => $ts,
                 ]);
             } catch (\Throwable $e) {
             }
-        }
-    }
-
-    protected function getApiKeyRaw(): ?string
-    {
-        if (self::$cachedApiKeyRaw !== null) {
-            return self::$cachedApiKeyRaw;
-        }
-
-        $this->ensureSettingsReady();
-
-        $apiKey = null;
-        try {
-            try {
-                $apiKey = Db::name('settings')->where('name', 'API_KEY')->value('value');
-            } catch (\Throwable $e) {
-                $apiKey = Db::name('settings')->where('key', 'API_KEY')->value('value');
-            }
-        } catch (\Throwable $e) {
-        }
-
-        if ($apiKey === null) {
-            $apiKey = env('API_KEY', null);
-        }
-
-        self::$cachedApiKeyRaw = $apiKey !== null ? (string)$apiKey : null;
-        return self::$cachedApiKeyRaw;
-    }
-
-    protected function getDefaultApiKeyId(): int
-    {
-        $this->ensureApiKeysReady();
-        try {
-            $v = Db::name('api_keys')->order('id', 'asc')->value('id');
-            return $v !== null ? (int)$v : 0;
-        } catch (\Throwable $e) {
-            return 0;
         }
     }
 
@@ -157,7 +71,12 @@ class ApiAuth
             return self::$cachedApiKeyRows;
         }
 
-        $raw = $this->getApiKeyRaw();
+        $raw = $this->getSettingRaw('API_KEY');
+        if ($raw === null) {
+            $envValue = env('API_KEY', null);
+            $raw = $envValue !== null ? (string)$envValue : null;
+        }
+
         $legacyKeys = $raw !== null ? $this->parseApiKeys($raw) : [];
         if ($legacyKeys) {
             $this->writeApiKeysToTable($legacyKeys);
@@ -172,15 +91,9 @@ class ApiAuth
         return self::$cachedApiKeyRows;
     }
 
-    /**
-     * 验证API密钥
-     *
-     * @param \think\Request $request
-     * @param \Closure $next
-     * @return mixed
-     */
     public function handle($request, \Closure $next)
     {
+        // 确保至少有一个 API Key 存在（首次启动时可能需要迁移）
         $rows = $this->getApiKeyRows();
         if (!$rows) {
             return json([
@@ -189,10 +102,8 @@ class ApiAuth
             ], 500);
         }
         
-        // 获取请求头中的Authorization
         $authorization = $request->header('Authorization');
         
-        // 检查Authorization头格式是否正确
         if (empty($authorization) || !preg_match('/^Bearer\s+(.*)$/', $authorization, $matches)) {
             return json([
                 'code' => 401,
@@ -200,21 +111,18 @@ class ApiAuth
             ], 401);
         }
         
-        // 提取密钥
         $providedKey = trim((string)$matches[1]);
-        
-        // 验证密钥
-        $ok = false;
+        $providedHash = hash('sha256', $providedKey);
+
         $apiKeyId = 0;
-        foreach ($rows as $r) {
-            $k = (string)($r['value'] ?? '');
-            if ($k !== '' && hash_equals($k, $providedKey)) {
-                $ok = true;
-                $apiKeyId = (int)($r['id'] ?? 0);
-                break;
-            }
+        try {
+            $id = Db::name('api_keys')->where('hash', $providedHash)->value('id');
+            $apiKeyId = $id !== null ? (int)$id : 0;
+        } catch (\Throwable $e) {
+            $apiKeyId = 0;
         }
-        if (!$ok) {
+
+        if ($apiKeyId <= 0) {
             return json([
                 'code' => 401,
                 'msg' => 'Unauthorized: Invalid API key'
@@ -227,7 +135,6 @@ class ApiAuth
             'api_key_is_default' => $defaultId > 0 && $apiKeyId === $defaultId,
         ]);
         
-        // 密钥验证通过，继续执行请求
         return $next($request);
     }
 }

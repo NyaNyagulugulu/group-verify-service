@@ -25,6 +25,11 @@ class Index extends BaseController
             return response('', 404);
         }
 
+        // 安全检查：即使 .env 被删除，如果数据库中已有配置数据，也拒绝重新初始化
+        if ($this->isAlreadyInitialized()) {
+            return response('系统已初始化，禁止重复操作。如需重新配置，请手动清理数据库。', 403);
+        }
+
         $defaults = [
             'app_debug'            => 'false',
             'geetest_captcha_id'   => '',
@@ -33,7 +38,7 @@ class Index extends BaseController
             'geetest_code_expire'  => '300',
             'api_key'              => $this->generateApiKey(),
             'salt'                 => $this->generateSalt(),
-            'db_sqlite_path'       => './database/geetest.db',
+            'db_sqlite_path'       => './database/sqlite.db',
         ];
 
         $checks = $this->collectSetupChecks($rootPath);
@@ -212,7 +217,7 @@ class Index extends BaseController
     {
         $lines = [];
         $lines[] = 'DB_DRIVER = sqlite';
-        $lines[] = 'DB_SQLITE_PATH = ' . $this->envEncode($values['db_sqlite_path']);
+        $lines[] = 'DB_PATH = ' . $this->envEncode($values['db_sqlite_path']);
 
         return implode("\n", $lines) . "\n";
     }
@@ -234,7 +239,7 @@ class Index extends BaseController
     {
         $sqlitePath = trim($sqlitePath);
         if ($sqlitePath === '') {
-            return $rootPath . 'database' . DIRECTORY_SEPARATOR . 'geetest.db';
+            return $rootPath . 'database' . DIRECTORY_SEPARATOR . 'sqlite.db';
         }
 
         if (strpos($sqlitePath, '/') === 0 || strpos($sqlitePath, '\\') === 0 || preg_match('/^[a-zA-Z]:/', $sqlitePath)) {
@@ -328,11 +333,11 @@ class Index extends BaseController
 
             $pdo->exec('CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                value TEXT NOT NULL,
+                hash TEXT NOT NULL,
                 created_at INTEGER UNSIGNED NOT NULL,
                 updated_at INTEGER UNSIGNED NOT NULL
             )');
-            $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS uniq_api_keys_value ON api_keys(value)');
+            $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS uniq_api_keys_hash ON api_keys(hash)');
 
             try {
                 $pdo->exec('DELETE FROM api_keys');
@@ -341,10 +346,10 @@ class Index extends BaseController
 
             $keys = $this->parseApiKeys($rawApiKey);
             if ($keys) {
-                $insertKeyStmt = $pdo->prepare('INSERT OR IGNORE INTO api_keys (value, created_at, updated_at) VALUES (:value, :created_at, :updated_at)');
+                $insertKeyStmt = $pdo->prepare('INSERT OR IGNORE INTO api_keys (hash, created_at, updated_at) VALUES (:hash, :created_at, :updated_at)');
                 foreach ($keys as $k) {
                     $insertKeyStmt->execute([
-                        ':value' => $k,
+                        ':hash' => hash('sha256', $k),
                         ':created_at' => $ts,
                         ':updated_at' => $ts,
                     ]);
@@ -355,6 +360,34 @@ class Index extends BaseController
         }
 
         return true;
+    }
+
+    private function isAlreadyInitialized(): bool
+    {
+        // 检查是否存在已知的 SQLite 数据库文件
+        $possiblePaths = [
+            root_path() . 'database' . DIRECTORY_SEPARATOR . 'sqlite.db',
+            root_path() . 'database' . DIRECTORY_SEPARATOR . 'geetest.db',
+            root_path() . 'sqlite.db',
+        ];
+
+        foreach ($possiblePaths as $dbPath) {
+            if (!is_file($dbPath)) {
+                continue;
+            }
+            try {
+                $pdo = new \PDO('sqlite:' . $dbPath);
+                $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+                $count = (int)$pdo->query("SELECT COUNT(*) FROM settings")->fetchColumn();
+                if ($count > 0) {
+                    return true;
+                }
+            } catch (\Throwable $e) {
+                // 表不存在或无法连接，继续检查下一个路径
+            }
+        }
+
+        return false;
     }
 
     private function parseApiKeys(string $raw): array
@@ -491,7 +524,7 @@ class Index extends BaseController
 
     <section class="panel" data-panel="2">
       <h2>步骤 2：填写配置</h2>
-      <p class="desc">这些配置会写入 SQLite 数据库的 <span class="mono">settings</span> 表；其中 <span class="mono">API_KEY</span> 会写入 <span class="mono">api_keys</span> 表。<span class="mono">backend/.env</span> 仅保存数据库连接信息。提交后会自动初始化 SQLite 数据库（默认 <span class="mono">backend/database/geetest.db</span>）。</p>
+      <p class="desc">这些配置会写入 SQLite 数据库的 <span class="mono">settings</span> 表；其中 <span class="mono">API_KEY</span> 会写入 <span class="mono">api_keys</span> 表。<span class="mono">backend/.env</span> 仅保存数据库连接信息。提交后会自动初始化 SQLite 数据库（默认 <span class="mono">backend/database/sqlite.db</span>）。</p>
 
       <div class="group">
         <div class="group-title">极验配置</div>
@@ -669,7 +702,7 @@ a:hover{text-decoration:underline;}
     lines.push("GEETEST_CODE_EXPIRE: " + getValue("geetest_code_expire"));
     lines.push("API_KEY: " + mask(getValue("api_key")));
     lines.push("SALT: " + mask(getValue("salt")));
-    lines.push("DB_SQLITE_PATH: " + getValue("db_sqlite_path"));
+    lines.push("DB_PATH: " + getValue("db_sqlite_path"));
     lines.push("APP_DEBUG: " + getValue("app_debug"));
     confirmText.textContent = lines.join("\n");
   }

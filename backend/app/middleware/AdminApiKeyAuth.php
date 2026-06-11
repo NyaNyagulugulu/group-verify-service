@@ -1,7 +1,7 @@
 <?php
 namespace app\middleware;
 
-class AdminJwtAuth
+class AdminApiKeyAuth
 {
     public function handle($request, \Closure $next)
     {
