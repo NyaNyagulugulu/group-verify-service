@@ -2,56 +2,13 @@
 namespace app\controller;
 
 use app\BaseController;
+use app\model\GeetestModel;
+use app\traits\ApiKeyTrait;
 use think\facade\Db;
 
 class AdminSettingsController extends BaseController
 {
-    protected static bool $settingsReady = false;
-    protected static bool $apiKeysReady = false;
-
-    protected function ensureSettingsReady(): void
-    {
-        if (self::$settingsReady) {
-            return;
-        }
-        ensure_settings_table();
-        self::$settingsReady = true;
-    }
-
-    protected function ensureApiKeysReady(): void
-    {
-        if (self::$apiKeysReady) {
-            return;
-        }
-        ensure_api_keys_table();
-        self::$apiKeysReady = true;
-    }
-
-    protected function getJsonBody(): array
-    {
-        $raw = (string)$this->request->getInput();
-        if ($raw === '') {
-            return [];
-        }
-        $data = json_decode($raw, true);
-        return is_array($data) ? $data : [];
-    }
-
-    protected function getSettingRaw(string $key): ?string
-    {
-        $this->ensureSettingsReady();
-
-        try {
-            try {
-                $value = Db::name('settings')->where('name', $key)->value('value');
-            } catch (\Throwable $e) {
-                $value = Db::name('settings')->where('key', $key)->value('value');
-            }
-            return $value !== null ? (string)$value : null;
-        } catch (\Throwable $e) {
-            return null;
-        }
-    }
+    use ApiKeyTrait;
 
     protected function getSettingWithFallback(string $key, string $default = ''): array
     {
@@ -68,110 +25,6 @@ class AdminSettingsController extends BaseController
         }
 
         return ['value' => $default, 'source' => 'DEFAULT'];
-    }
-
-    protected function upsertSetting(string $key, string $value): void
-    {
-        $this->ensureSettingsReady();
-        $ts = time();
-
-        try {
-            $updated = 0;
-            try {
-                $updated = (int)Db::name('settings')->where('name', $key)->update([
-                    'value' => $value,
-                    'updated_at' => $ts,
-                ]);
-            } catch (\Throwable $e) {
-                $updated = (int)Db::name('settings')->where('key', $key)->update([
-                    'value' => $value,
-                    'updated_at' => $ts,
-                ]);
-            }
-
-            if ($updated > 0) {
-                return;
-            }
-
-            try {
-                Db::name('settings')->insert([
-                    'name' => $key,
-                    'value' => $value,
-                    'created_at' => $ts,
-                    'updated_at' => $ts,
-                ]);
-            } catch (\Throwable $e) {
-                Db::name('settings')->insert([
-                    'key' => $key,
-                    'value' => $value,
-                    'created_at' => $ts,
-                    'updated_at' => $ts,
-                ]);
-            }
-        } catch (\Throwable $e) {
-        }
-    }
-
-    protected function deleteSetting(string $key): void
-    {
-        $this->ensureSettingsReady();
-        try {
-            try {
-                Db::name('settings')->where('name', $key)->delete();
-            } catch (\Throwable $e) {
-                Db::name('settings')->where('key', $key)->delete();
-            }
-        } catch (\Throwable $e) {
-        }
-    }
-
-    protected function maskSecret(string $value): string
-    {
-        $v = trim($value);
-        if ($v === '') {
-            return '';
-        }
-        if (mb_strlen($v) <= 8) {
-            return '******';
-        }
-        return mb_substr($v, 0, 4) . '...' . mb_substr($v, -4);
-    }
-
-    protected function parseApiKeys(string $raw): array
-    {
-        $v = trim($raw);
-        if ($v === '') {
-            return [];
-        }
-
-        if (str_starts_with($v, '[') && str_ends_with($v, ']')) {
-            $decoded = json_decode($v, true);
-            if (is_array($decoded)) {
-                $keys = [];
-                foreach ($decoded as $it) {
-                    if (!is_string($it)) {
-                        continue;
-                    }
-                    $k = trim($it);
-                    if ($k === '') {
-                        continue;
-                    }
-                    $keys[$k] = true;
-                }
-                return array_keys($keys);
-            }
-        }
-
-        $parts = preg_split('/[,\s;，；]+/u', $v) ?: [];
-        $keys = [];
-        foreach ($parts as $p) {
-            $k = trim((string)$p);
-            if ($k === '') {
-                continue;
-            }
-            $keys[$k] = true;
-        }
-        return array_keys($keys);
     }
 
     protected function maskSecretList(string $value): string
@@ -191,69 +44,77 @@ class AdminSettingsController extends BaseController
     {
         $this->ensureApiKeysReady();
         try {
-            $rows = Db::name('api_keys')->column('value');
-            $keys = [];
-            foreach ($rows ?: [] as $v) {
-                $k = trim((string)$v);
+            $rows = Db::name('api_keys')->column('hash');
+            $hashes = [];
+            foreach ($rows ?: [] as $h) {
+                $k = trim((string)$h);
                 if ($k === '') {
                     continue;
                 }
-                $keys[$k] = true;
+                $hashes[$k] = true;
             }
-            return array_keys($keys);
+            return array_keys($hashes);
         } catch (\Throwable $e) {
             return [];
         }
     }
 
-    protected function writeApiKeysToTable(array $keys, bool $replaceAll): void
+    protected function writeApiKeysToTable(array $keys, bool $replaceAll): int
     {
         $this->ensureApiKeysReady();
         $ts = time();
+        $failed = 0;
 
         if ($replaceAll) {
+            Db::startTrans();
             try {
                 Db::name('api_keys')->delete(true);
+
+                foreach ($keys as $v) {
+                    $k = trim((string)$v);
+                    if ($k === '') {
+                        continue;
+                    }
+                    try {
+                        Db::name('api_keys')->insert([
+                            'hash' => hash('sha256', $k),
+                            'created_at' => $ts,
+                            'updated_at' => $ts,
+                        ]);
+                    } catch (\Throwable $e) {
+                        $failed++;
+                    }
+                }
+
+                if ($failed >= count($keys)) {
+                    Db::rollback();
+                    return -1;
+                }
+
+                Db::commit();
             } catch (\Throwable $e) {
+                Db::rollback();
+                return -1;
+            }
+        } else {
+            foreach ($keys as $v) {
+                $k = trim((string)$v);
+                if ($k === '') {
+                    continue;
+                }
+                try {
+                    Db::name('api_keys')->insert([
+                        'hash' => hash('sha256', $k),
+                        'created_at' => $ts,
+                        'updated_at' => $ts,
+                    ]);
+                } catch (\Throwable $e) {
+                    $failed++;
+                }
             }
         }
 
-        foreach ($keys as $v) {
-            $k = trim((string)$v);
-            if ($k === '') {
-                continue;
-            }
-            try {
-                Db::name('api_keys')->insert([
-                    'value' => $k,
-                    'created_at' => $ts,
-                    'updated_at' => $ts,
-                ]);
-            } catch (\Throwable $e) {
-            }
-        }
-    }
-
-    protected function ensureApiKeysMigrated(): void
-    {
-        $existing = $this->readApiKeysFromTable();
-        if ($existing) {
-            return;
-        }
-
-        $raw = $this->getSettingRaw('API_KEY');
-        if ($raw === null || trim((string)$raw) === '') {
-            $envValue = env('API_KEY', null);
-            $raw = $envValue !== null ? (string)$envValue : '';
-        }
-
-        $keys = $this->parseApiKeys((string)$raw);
-        if (!$keys) {
-            return;
-        }
-
-        $this->writeApiKeysToTable($keys, false);
-        $this->deleteSetting('API_KEY');
+        return $failed;
     }
 
     protected function whitelist(): array
@@ -276,17 +137,14 @@ class AdminSettingsController extends BaseController
         foreach ($this->whitelist() as $def) {
             $key = (string)$def['key'];
             if ($key === 'API_KEY') {
-                $keys = $this->readApiKeysFromTable();
-                $masked = [];
-                foreach ($keys as $k) {
-                    $masked[] = $this->maskSecret((string)$k);
-                }
+                $hashes = $this->readApiKeysFromTable();
+                $count = count($hashes);
                 $items[] = [
                     'key' => $key,
                     'label' => (string)($def['label'] ?? $key),
-                    'is_set' => (bool)$keys,
+                    'is_set' => $count > 0,
                     'value' => '',
-                    'masked' => $keys ? implode('，', $masked) : '',
+                    'masked' => $count > 0 ? ($count . ' 个密钥已配置') : '',
                     'source' => 'API_KEYS',
                 ];
                 continue;
@@ -329,7 +187,8 @@ class AdminSettingsController extends BaseController
             $defs[(string)$def['key']] = $def;
         }
 
-        $errors = [];
+        // 统一预处理参数：过滤、转换
+        $parsed = [];
         foreach ($values as $key => $value) {
             $k = (string)$key;
             if (!isset($defs[$k])) {
@@ -340,7 +199,12 @@ class AdminSettingsController extends BaseController
             if ($v === '') {
                 continue;
             }
+            $parsed[$k] = $v;
+        }
 
+        // 验证
+        $errors = [];
+        foreach ($parsed as $k => $v) {
             $type = (string)($defs[$k]['type'] ?? 'string');
             if ($type === 'int') {
                 if (!ctype_digit($v)) {
@@ -382,27 +246,32 @@ class AdminSettingsController extends BaseController
             return json(['code' => 400, 'msg' => implode('；', $errors)], 400);
         }
 
-        foreach ($values as $key => $value) {
-            $k = (string)$key;
-            if (!isset($defs[$k])) {
-                continue;
-            }
-            $v = is_string($value) ? $value : (is_null($value) ? '' : json_encode($value, JSON_UNESCAPED_UNICODE));
-            $v = trim((string)$v);
-            if ($v === '') {
-                continue;
-            }
+        // 写入（复用已解析的数据）
+        foreach ($parsed as $k => $v) {
             if ($k === 'API_KEY') {
                 $keys = $this->parseApiKeys($v);
                 if ($keys) {
-                    $this->writeApiKeysToTable($keys, true);
-                    $this->deleteSetting('API_KEY');
+                    $failed = $this->writeApiKeysToTable($keys, true);
+                    if ($failed < 0) {
+                        $errors[] = 'API_KEY 替换失败：无法清除旧密钥';
+                    } elseif ($failed > 0) {
+                        $errors[] = 'API_KEY 写入部分失败（' . $failed . ' 个）';
+                        $this->deleteSetting('API_KEY');
+                    } else {
+                        $this->deleteSetting('API_KEY');
+                    }
                 }
                 continue;
             }
             $this->upsertSetting($k, $v);
         }
 
+        if ($errors) {
+            GeetestModel::reloadConfig();
+            return json(['code' => 207, 'msg' => implode('；', $errors)], 207);
+        }
+
+        GeetestModel::reloadConfig();
         return $this->get();
     }
 
@@ -584,7 +453,8 @@ class AdminSettingsController extends BaseController
                 $q = $q->where('status_code', $statusCode);
             }
             if ($endpoint !== '') {
-                $q = $q->where('endpoint', 'like', '%' . $endpoint . '%');
+                $escaped = addcslashes($endpoint, '%_');
+                $q = $q->where('endpoint', 'like', '%' . $escaped . '%');
             }
             if ($groupId !== '') {
                 $q = $q->where('group_id', $groupId);

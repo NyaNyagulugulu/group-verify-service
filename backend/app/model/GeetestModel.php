@@ -12,63 +12,35 @@ class GeetestModel
     protected static int $codeExpire;
     protected static string $salt;
     protected static bool $initialized = false;
-    protected static bool $settingsReady = false;
+    protected static int $initializedAt = 0;
+    protected static int $configTtl = 10;
     protected static bool $ownershipReady = false;
 
     protected static function ensureSettingsReady(): void
     {
-        if (self::$settingsReady) {
-            return;
-        }
+        ensure_settings_table();
+    }
 
-        try {
-            Db::name('settings')->where('id', '>', 0)->limit(1)->value('id');
-            self::$settingsReady = true;
-            return;
-        } catch (\Throwable $e) {
-        }
-
-        try {
-            try {
-                Db::execute('CREATE TABLE IF NOT EXISTS `settings` (
-                    `id` INTEGER PRIMARY KEY AUTOINCREMENT,
-                    `name` VARCHAR(128) NOT NULL UNIQUE,
-                    `value` TEXT NOT NULL,
-                    `created_at` INTEGER UNSIGNED NOT NULL,
-                    `updated_at` INTEGER UNSIGNED NOT NULL
-                )');
-                Db::execute('CREATE INDEX IF NOT EXISTS `idx_settings_name` ON `settings` (`name`)');
-            } catch (\Throwable $e) {
-                Db::execute('CREATE TABLE IF NOT EXISTS `settings` (
-                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                    `name` VARCHAR(128) NOT NULL UNIQUE,
-                    `value` TEXT NOT NULL,
-                    `created_at` INT UNSIGNED NOT NULL,
-                    `updated_at` INT UNSIGNED NOT NULL
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
-            }
-        } catch (\Throwable $e) {
-        }
-
-        self::$settingsReady = true;
+    /**
+     * 探测 settings 表字段名（name 或 key），复用 common.php 中的 detect_settings_field()
+     */
+    protected static function detectSettingsField(): string
+    {
+        return detect_settings_field();
     }
 
     protected static function getSetting(string $key, $default = null)
     {
         self::ensureSettingsReady();
+        $field = self::detectSettingsField();
+
         try {
-            try {
-                $value = Db::name('settings')->where('name', $key)->value('value');
-                if ($value !== null) {
-                    return $value;
-                }
-            } catch (\Throwable $e) {
-                $value = Db::name('settings')->where('key', $key)->value('value');
-                if ($value !== null) {
-                    return $value;
-                }
+            $value = Db::name('settings')->where($field, $key)->value('value');
+            if ($value !== null) {
+                return $value;
             }
         } catch (\Throwable $e) {
+            \think\facade\Log::warning('GeetestModel::getSetting - 读取配置失败: ' . $key . ' - ' . $e->getMessage());
         }
 
         $envValue = env($key, null);
@@ -78,22 +50,14 @@ class GeetestModel
 
         $ts = time();
         try {
-            try {
-                Db::name('settings')->insert([
-                    'name' => $key,
-                    'value' => (string)$envValue,
-                    'created_at' => $ts,
-                    'updated_at' => $ts,
-                ]);
-            } catch (\Throwable $e) {
-                Db::name('settings')->insert([
-                    'key' => $key,
-                    'value' => (string)$envValue,
-                    'created_at' => $ts,
-                    'updated_at' => $ts,
-                ]);
-            }
+            Db::name('settings')->insert([
+                $field => $key,
+                'value' => (string)$envValue,
+                'created_at' => $ts,
+                'updated_at' => $ts,
+            ]);
         } catch (\Throwable $e) {
+            \think\facade\Log::warning('GeetestModel::getSetting - 写入配置失败: ' . $key . ' - ' . $e->getMessage());
         }
 
         return $envValue;
@@ -101,7 +65,8 @@ class GeetestModel
 
     protected static function initConfig()
     {
-        if (self::$initialized) {
+        $now = time();
+        if (self::$initialized && ($now - self::$initializedAt) < self::$configTtl) {
             return;
         }
 
@@ -112,6 +77,13 @@ class GeetestModel
         self::$salt = (string)self::getSetting('SALT', '');
 
         self::$initialized = true;
+        self::$initializedAt = $now;
+    }
+
+    public static function reloadConfig(): void
+    {
+        self::$initialized = false;
+        self::$initializedAt = 0;
     }
 
     protected static function ensureOwnershipReady(): void
@@ -134,6 +106,7 @@ class GeetestModel
                 Db::execute('ALTER TABLE `GeetestTable` ADD COLUMN `api_key_id` INT UNSIGNED NULL');
             }
         } catch (\Throwable $e) {
+            \think\facade\Log::warning('GeetestModel::ensureOwnershipReady - 添加 api_key_id 列失败: ' . $e->getMessage());
         }
 
         try {
@@ -142,6 +115,7 @@ class GeetestModel
             try {
                 Db::execute('CREATE INDEX `idx_api_key_expire` ON `GeetestTable` (`api_key_id`, `expire_at`)');
             } catch (\Throwable $e2) {
+                \think\facade\Log::warning('GeetestModel::ensureOwnershipReady - 创建索引失败: ' . $e2->getMessage());
             }
         }
 
@@ -151,20 +125,39 @@ class GeetestModel
     public static function generateToken(string $gid, string $uid)
     {
         self::initConfig();
+        if (self::$salt === '') {
+            \think\facade\Log::warning('GeetestModel::generateToken - SALT 未配置，token 安全性降低');
+        }
         $timestamp = time();
-        return hash('sha256', $gid . $uid . $timestamp . self::$salt);
+        $random = bin2hex(random_bytes(16));
+        return hash('sha256', $gid . $uid . $timestamp . $random . self::$salt);
     }
 
-
-
-    public static function generateCode()
+    public static function generateCode(string $groupId = '')
     {
         $characters = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-        $code = '';
-        for ($i = 0; $i < 6; $i++) {
-            $code .= $characters[random_int(0, strlen($characters) - 1)];
+        $maxAttempts = 10;
+
+        for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+            $code = '';
+            for ($i = 0; $i < 6; $i++) {
+                $code .= $characters[random_int(0, strlen($characters) - 1)];
+            }
+
+            // 检查同 group 下是否存在未过期且未使用的相同验证码
+            $query = GeetestTable::where('code', $code)
+                ->where('verified', 1)
+                ->where('used', 0)
+                ->where('expire_at', '>', time());
+            if ($groupId !== '') {
+                $query = $query->where('group_id', $groupId);
+            }
+            if (!$query->find()) {
+                return $code;
+            }
         }
-        return $code;
+
+        throw new \RuntimeException('验证码生成失败：连续碰撞次数过多，请稍后重试');
     }
 
     public static function saveVerifyData(string $token, array $data)
@@ -201,7 +194,6 @@ class GeetestModel
         }
 
         if ($validate->expire_at < time()) {
-            self::deleteVerifyData($token);
             return null;
         }
 
@@ -325,24 +317,10 @@ class GeetestModel
         return self::$codeExpire;
     }
 
-    public static function cleanExpiredCodes()
+    public static function cleanExpiredCodes(int $apiKeyId = 0, bool $isDefault = false)
     {
         self::initConfig();
         self::ensureOwnershipReady();
-
-        $apiKeyId = 0;
-        try {
-            $apiKeyId = (int)Request::middleware('api_key_id', 0);
-        } catch (\Throwable $e) {
-            $apiKeyId = 0;
-        }
-
-        $isDefault = false;
-        try {
-            $isDefault = (bool)Request::middleware('api_key_is_default', false);
-        } catch (\Throwable $e) {
-            $isDefault = false;
-        }
 
         $q = GeetestTable::where('expire_at', '<', time());
         if (!$isDefault && $apiKeyId > 0) {
@@ -358,24 +336,19 @@ class GeetestModel
     {
         self::initConfig();
 
-        $validate = GeetestTable::where('code', $code)
+        $now = time();
+        // 使用条件更新避免并发竞态：只有 used=0 的记录才会被更新
+        $affected = GeetestTable::where('code', $code)
             ->where('group_id', $gid)
-            ->find();
+            ->where('verified', 1)
+            ->where('used', 0)
+            ->where('expire_at', '>', $now)
+            ->update([
+                'used' => 1,
+                'used_at' => $now,
+                'updated_at' => $now,
+            ]);
 
-        if ($validate) {
-            $validate->used = 1;
-            $validate->used_at = time();
-            $validate->updated_at = time();
-            $result = $validate->save();
-            
-            // 删除验证数据，使验证链接失效
-            if ($result) {
-                self::deleteVerifyData($validate->token);
-            }
-            
-            return $result;
-        }
-
-        return false;
+        return $affected > 0;
     }
 }

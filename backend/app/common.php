@@ -3,6 +3,67 @@
 use think\facade\Cache;
 use think\facade\Db;
 
+if (!function_exists('curl')) {
+    /**
+     * 发起 HTTP 请求（cURL 封装）
+     * @param string $url 请求地址
+     * @param array|string $data POST 数据
+     * @param int $timeout 超时秒数
+     * @param string $method 请求方法
+     * @return array ['http_code' => int, 'content' => string, 'error' => string]
+     */
+    function curl(string $url, $data = [], int $timeout = 10, string $method = 'GET'): array
+    {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+
+        if (strtoupper($method) === 'POST') {
+            curl_setopt($ch, CURLOPT_POST, true);
+            if (is_array($data)) {
+                $postBody = http_build_query($data);
+            } else {
+                $postBody = (string)$data;
+            }
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $postBody);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/x-www-form-urlencoded']);
+        }
+
+        $content = curl_exec($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        return [
+            'http_code' => $httpCode,
+            'content' => $content !== false ? (string)$content : '',
+            'error' => $error,
+        ];
+    }
+}
+
+function detect_settings_field(): string
+{
+    static $field = null;
+    if ($field !== null) {
+        return $field;
+    }
+
+    ensure_settings_table();
+
+    try {
+        Db::name('settings')->where('name', '__probe__')->limit(1)->value('id');
+        $field = 'name';
+    } catch (\Throwable $e) {
+        $field = 'key';
+    }
+
+    return $field;
+}
+
 function ensure_settings_table(): void
 {
     static $ready = false;
@@ -60,19 +121,39 @@ function ensure_api_keys_table(): void
         try {
             Db::execute('CREATE TABLE IF NOT EXISTS `api_keys` (
                 `id` INTEGER PRIMARY KEY AUTOINCREMENT,
-                `value` TEXT NOT NULL,
+                `hash` TEXT NOT NULL,
                 `created_at` INTEGER UNSIGNED NOT NULL,
                 `updated_at` INTEGER UNSIGNED NOT NULL
             )');
-            Db::execute('CREATE UNIQUE INDEX IF NOT EXISTS `uniq_api_keys_value` ON `api_keys` (`value`)');
+            Db::execute('CREATE UNIQUE INDEX IF NOT EXISTS `uniq_api_keys_hash` ON `api_keys` (`hash`)');
         } catch (\Throwable) {
             Db::execute('CREATE TABLE IF NOT EXISTS `api_keys` (
                 `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                `value` VARCHAR(255) NOT NULL,
+                `hash` VARCHAR(64) NOT NULL,
                 `created_at` INT UNSIGNED NOT NULL,
                 `updated_at` INT UNSIGNED NOT NULL,
-                UNIQUE KEY `uniq_api_keys_value` (`value`)
+                UNIQUE KEY `uniq_api_keys_hash` (`hash`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        }
+    } catch (\Throwable) {
+    }
+
+    // 迁移旧的明文 value 字段到 hash 字段
+    try {
+        $hasValue = false;
+        try {
+            Db::query('SELECT `value` FROM `api_keys` LIMIT 1');
+            $hasValue = true;
+        } catch (\Throwable) {
+        }
+        if ($hasValue) {
+            $rows = Db::name('api_keys')->whereNull('hash')->whereOr('hash', '')->select()->toArray();
+            foreach ($rows as $r) {
+                $v = trim((string)($r['value'] ?? ''));
+                if ($v === '') continue;
+                $h = hash('sha256', $v);
+                Db::name('api_keys')->where('id', (int)$r['id'])->update(['hash' => $h]);
+            }
         }
     } catch (\Throwable) {
     }
@@ -142,6 +223,12 @@ function ensure_api_call_logs_table(): void
     $ready = true;
 }
 
+/**
+ * 限流检查
+ * 
+ * 注意：生产环境强烈建议配置 Redis 作为缓存驱动。
+ * 文件锁回退方案在高并发下存在竞态窗口，无法保证精确限流。
+ */
 function rate_limit_hit(string $key, int $limit, int $windowSeconds): int
 {
     $k = trim($key);
@@ -150,24 +237,99 @@ function rate_limit_hit(string $key, int $limit, int $windowSeconds): int
     }
 
     $now = time();
-    $data = Cache::get($k, null);
-    $count = 0;
-    $expireAt = 0;
-    if (is_array($data)) {
-        $count = (int)($data['count'] ?? 0);
-        $expireAt = (int)($data['expire_at'] ?? 0);
+
+    // 尝试使用 Redis 原子操作（如果可用）
+    $store = Cache::store();
+    $handler = null;
+    try {
+        $handler = $store->handler();
+    } catch (\Throwable $e) {
     }
 
-    if ($expireAt <= $now) {
-        $expireAt = $now + $windowSeconds;
-        Cache::set($k, ['count' => 1, 'expire_at' => $expireAt], $windowSeconds);
+    if ($handler instanceof \Redis) {
+        try {
+            $count = $handler->incr($k);
+            if ($count === 1) {
+                $handler->expire($k, $windowSeconds);
+            }
+            if ($count > $limit) {
+                $ttl = $handler->ttl($k);
+                return max(1, $ttl > 0 ? $ttl : 1);
+            }
+            return 0;
+        } catch (\Throwable $e) {
+            // Redis 不可用时回退到文件缓存
+        }
+    }
+
+    // 回退方案：文件锁 + 文件缓存（尽力而为的降级限流，非绝对精确但显著减少竞态）
+    $lockFile = runtime_path() . 'lock' . DIRECTORY_SEPARATOR . md5($k) . '.lock';
+    $lockDir = dirname($lockFile);
+    if (!is_dir($lockDir)) {
+        @mkdir($lockDir, 0755, true);
+    }
+
+    // 定期清理过期 lock 文件（概率触发，约 1% 请求执行清理）
+    if (random_int(1, 100) === 1) {
+        try {
+            $lockFiles = glob($lockDir . DIRECTORY_SEPARATOR . '*.lock');
+            if (is_array($lockFiles)) {
+                $staleThreshold = $now - $windowSeconds * 2;
+                foreach ($lockFiles as $lf) {
+                    if (@filemtime($lf) < $staleThreshold) {
+                        @unlink($lf);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+    }
+
+    $fp = @fopen($lockFile, 'c');
+    if ($fp === false) {
+        // 无法获取锁文件时降级为无锁模式
+        $data = Cache::get($k, null);
+        $count = 0;
+        $expireAt = 0;
+        if (is_array($data)) {
+            $count = (int)($data['count'] ?? 0);
+            $expireAt = (int)($data['expire_at'] ?? 0);
+        }
+        if ($expireAt <= $now) {
+            Cache::set($k, ['count' => 1, 'expire_at' => $now + $windowSeconds], $windowSeconds);
+            return 0;
+        }
+        if ($count >= $limit) {
+            return max(1, $expireAt - $now);
+        }
+        Cache::set($k, ['count' => $count + 1, 'expire_at' => $expireAt], $expireAt - $now);
         return 0;
     }
 
-    if ($count >= $limit) {
-        return max(1, $expireAt - $now);
-    }
+    flock($fp, LOCK_EX);
+    try {
+        $data = Cache::get($k, null);
+        $count = 0;
+        $expireAt = 0;
+        if (is_array($data)) {
+            $count = (int)($data['count'] ?? 0);
+            $expireAt = (int)($data['expire_at'] ?? 0);
+        }
 
-    Cache::set($k, ['count' => $count + 1, 'expire_at' => $expireAt], $expireAt - $now);
-    return 0;
+        if ($expireAt <= $now) {
+            $expireAt = $now + $windowSeconds;
+            Cache::set($k, ['count' => 1, 'expire_at' => $expireAt], $windowSeconds);
+            return 0;
+        }
+
+        if ($count >= $limit) {
+            return max(1, $expireAt - $now);
+        }
+
+        Cache::set($k, ['count' => $count + 1, 'expire_at' => $expireAt], $expireAt - $now);
+        return 0;
+    } finally {
+        flock($fp, LOCK_UN);
+        fclose($fp);
+    }
 }
