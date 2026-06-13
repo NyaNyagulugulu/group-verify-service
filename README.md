@@ -1,5 +1,6 @@
 # 入群极验验证后端服务 (group-verify-service)
 ## 原作：[yjwmidc/group-verify-service](https://github.com/yjwmidc/group-verify-service/)
+## 友链：[Neko云](https://music.cnmsb.xin/)
 
 <div align="center">
 
