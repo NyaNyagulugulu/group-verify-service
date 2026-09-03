@@ -377,11 +377,22 @@ onMounted(() => {
   z-index: 2;
   width: min(100%, 520px);
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.52);
   border-radius: 20px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 24px 70px rgba(1, 12, 24, 0.32), 0 4px 16px rgba(1, 12, 24, 0.16);
+  background: rgba(235, 246, 248, 0.58);
+  box-shadow: 0 24px 70px rgba(1, 12, 24, 0.34), 0 4px 16px rgba(1, 12, 24, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  -webkit-backdrop-filter: blur(28px) saturate(1.18);
+  backdrop-filter: blur(28px) saturate(1.18);
   animation: cardFadeIn 0.45s ease-out both;
+}
+
+.glass-card::before {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  content: '';
+  pointer-events: none;
+  background: linear-gradient(125deg, rgba(255, 255, 255, 0.28), transparent 28%, transparent 72%, rgba(255, 255, 255, 0.1));
 }
 
 @keyframes cardFadeIn {
@@ -391,13 +402,16 @@ onMounted(() => {
 
 .card-header {
   position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
   padding: 28px 32px 26px;
   color: #f8fffe;
-  background: linear-gradient(140deg, #102b3d 0%, #0e4b52 100%);
+  background: linear-gradient(140deg, rgba(11, 39, 57, 0.82), rgba(13, 74, 80, 0.7));
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  backdrop-filter: blur(18px) saturate(1.25);
 }
 
 .card-header::after {
@@ -440,7 +454,9 @@ onMounted(() => {
 .verify-state {
   position: relative;
   padding: 32px;
-  background: #fff;
+  background: rgba(255, 255, 255, 0.72);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
 }
 
 .error-state::before,
@@ -550,7 +566,7 @@ onMounted(() => {
   color: #24546a;
   border: 1px solid #cbe7ef;
   border-radius: 11px;
-  background: #f3fbfd;
+  background: rgba(243, 251, 253, 0.7);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.8;
@@ -567,7 +583,9 @@ onMounted(() => {
   overflow: hidden;
   border: 1px solid #dce7ec;
   border-radius: 11px;
-  background: #f8fbfc;
+  background: rgba(248, 251, 252, 0.72);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -606,7 +624,9 @@ onMounted(() => {
 .btn-secondary {
   color: #315264;
   border-color: #c9d9e1;
-  background: #fff;
+  background: rgba(255, 255, 255, 0.58);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 
 .btn-secondary:hover:not(:disabled) { color: #1e4555; border-color: #8fcac5; background: #f3fbfa; }
